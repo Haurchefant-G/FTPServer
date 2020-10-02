@@ -55,7 +55,7 @@ int start()
 		}
 
 		pthread_t t;
-		pthread_create(&t, NULL, newService, (void *)connfd);
+		pthread_create(&t, NULL, newClient, (void *)connfd);
 
 		//close(connfd);
 	}
@@ -63,8 +63,9 @@ int start()
 	close(listenfd);
 }
 
-void * newService(void * arg)
+void * newClient(void * arg)
 {
+	pthread_detach(pthread_self());
 	struct client c;
 	c.connfd = ((int*)arg)[0];
 
@@ -115,16 +116,17 @@ void * newService(void * arg)
 
 			break;
 		case RETR:
-			response(c, cmdArg);
+			retrCmd(c, cmdArg);
 			break;
+		case STOR:
+
 		}
 
 	}
-
-
+	pthread_exit(NULL);
 }
 
-char* response(int connfd, ResCode code, char* info)
+void response(int connfd, ResCode code, char* info)
 {
 	char buf[COMMAND_BUFFER_MAX];
 	char* tok;
@@ -193,34 +195,25 @@ int pasvCmd(struct client& c)
 			break;
 	}
 
-	//开始监听socket
-	if (listen(listenfd, SOMAXCONN) == -1) {
-		printf("Error listen(): %s(%d)\n", strerror(errno), errno);
-		return 1;
-	}
+	////开始监听socket
+	//if (listen(listenfd, SOMAXCONN) == -1) {
+	//	printf("Error listen(): %s(%d)\n", strerror(errno), errno);
+	//	return 1;
+	//}
 
 	accept(c.filefd, NULL, NULL);
 }
 
 int retrCmd(struct client& c, char* arg)
 {
-	if (c.status == PORT)
+	if (strncmp(arg, "../", 3) == 0)
 	{
-		if ((c.filefd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
-			printf("Error socket(): %s(%d)\n", strerror(errno), errno);
-			return 1;
-		}
-		if (connect(c.filefd, (struct sockaddr*)&c.addr, sizeof(c.addr)) < 0) {
-			printf("Error connect(): %s(%d)\n", strerror(errno), errno);
-			return 1;
-		}
-
+		//不能访问上层文件
+		return 0;
+	}
+	if (c.status == PORT_STATUS)
+	{
 		FILE* fp = NULL;
-		if (strncmp(arg, "../", 3) == 0)
-		{
-			//不能访问上层文件
-			return 0;
-		}
 		fp = fopen(arg, "rb");
 		if (!fp)
 		{
@@ -228,25 +221,170 @@ int retrCmd(struct client& c, char* arg)
 		}
 		fseek(fp, 0, SEEK_END);
 		int len = ftell(fp);
-		if (len < 0)
-		{
+		char res[COMMAND_BUFFER_MAX] = RETR_RESPONSE_READY_TO_CONNECT;
+		strcat(res, arg);
+		sprintf(&res[strlen(res)], "(%d bytes)", len);
+		response(c.connfd, FILE_STATUS_OKAY, res);
 
-		}
-
-
-		response(c.connfd, FILE_STATUS_OKAY, strcat(RETR_RESPONSE_READY_TO_CONNECT, arg));
-		else
+		if (connectFileFd(c))
 		{
 			fseek(fp, 0, SEEK_SET);
-			char buf[TRANSFER_BUFFER_MAX];
-			while (!feof(fp)) {
-				int n = fread(buf, sizeof(char), TRANSFER_BUFFER_MAX, fp);
-				send(c.filefd, buf, n, 0);
-			}
-			fclose(fp);
+
+			struct fileTrans ft;
+			ft.fp = fp;
+			ft.c = &c;
+			pthread_create(&c.fileTrans, NULL, sendFile, (void*)&ft);
+
+			//char buf[TRANSFER_BUFFER_MAX];
+			//int sum = 0;
+			//while (!feof(fp)) {
+			//	int n = fread(buf, sizeof(char), TRANSFER_BUFFER_MAX, fp);
+			//	send(c.filefd, buf, n, 0);
+			//	sum += n;
+			//}
+			//close(c.filefd);
+			//c.transBytes += sum;
+			//++c.transFileNum;
+
+			//response(c.connfd, TRANSFER_COMPLETE, RETR_RESPONSE_TRANSEFER_COMPLETE);
 		}
+		else
+		{
+			fclose(fp);
+			return 0;
+		}
+		
+	}
+	else if (c.status == PASV_STATUS)
+	{
+		return;
+	}
+}
+
+
+void cleanup(void* arg)
+{
+	struct fileTrans* ft = (struct fileTrans*)arg;
+	close(ft->c->filefd);
+	fclose(ft->fp);
+}
+
+void* sendFile(void* arg)
+{
+	pthread_detach(pthread_self());
+
+	struct fileTrans* ft = (struct fileTrans*)arg;
+	pthread_cleanup_push(cleanup, ft);
+	char buf[TRANSFER_BUFFER_MAX];
+	int sum = 0;
+	while (!feof(ft->fp)) {
+		int n = fread(buf, sizeof(char), TRANSFER_BUFFER_MAX, ft->fp);
+		send(ft->c->filefd, buf, n, 0);
+		sum += n;
+	}
+	close(ft->c->filefd);
+	ft->c->transBytes += sum;
+	++ft->c->transFileNum;
+
+	fclose(ft->fp);
+
+	response(ft->c->connfd, TRANSFER_COMPLETE, RETR_RESPONSE_TRANSEFER_COMPLETE);
+
+	pthread_cleanup_pop(0);
+	pthread_exit(NULL);
+}
+
+int storCmd(struct client& c, char* arg)
+{
+	if (strncmp(arg, "../", 3) == 0)
+	{
+		//不能访问上层文件
+		return 0;
+	}
+	if (c.status == PORT_STATUS)
+	{
+		FILE* fp = NULL;
+		fp = fopen(arg, "wb");
+		char res[COMMAND_BUFFER_MAX] = STOR_RESPONSE_READY_TO_CONNECT;
+		strcat(res, arg);
+		response(c.connfd, FILE_STATUS_OKAY, res);
+
+		if (connectFileFd(c))
+		{
+
+			struct fileTrans ft;
+			ft.fp = fp;
+			ft.c = &c;
+			pthread_create(&c.fileTrans, NULL, sendFile, (void*)&ft);
+
+			/*char buf[TRANSFER_BUFFER_MAX];
+			int sum = 0;
+			while (!feof(fp)) {
+				int n = recv(c.filefd, buf, TRANSFER_BUFFER_MAX, 0);
+				fwrite(buf, sizeof(char), n, fp);
+				sum += n;
+			}
+
+			close(c.filefd);
+			c.transBytes += sum;
+			++c.transFileNum;
+
+			strcat(res, STOR_RESPONSE_TRANSEFER_COMPLETE);
+			sprintf(&res[strlen(res)], "(%d bytes)", sum);
+			response(c.connfd, TRANSFER_COMPLETE, res);*/
+		}
+		else
+		{
+			fclose(fp);
+			return 0;
+		}
+	}
+	else if (c.status == PASV_STATUS)
+	{
 
 	}
+}
+
+void* recvFile(void* arg)
+{
+	pthread_detach(pthread_self());
+
+	struct fileTrans* ft = (struct fileTrans*)arg;
+	pthread_cleanup_push(cleanup, ft);
+	char buf[TRANSFER_BUFFER_MAX];
+	int sum = 0;
+	while (!feof(ft->fp)) {
+		int n = recv(ft->c->filefd, buf, TRANSFER_BUFFER_MAX, 0);
+		fwrite(buf, sizeof(char), n, ft->fp);
+		sum += n;
+	}
+
+	close(ft->c->filefd);
+	ft->c->transBytes += sum;
+	++ft->c->transFileNum;
+
+	fclose(ft->fp);
+
+	char res[COMMAND_BUFFER_MAX];
+	strcat(res, STOR_RESPONSE_TRANSEFER_COMPLETE);
+	sprintf(&res[strlen(res)], "(%d bytes)", sum);
+	response(ft->c->connfd, TRANSFER_COMPLETE, res);
+
+	pthread_cleanup_pop(0);
+	pthread_exit(NULL);
+}
+
+int connectFileFd(struct client& c)
+{
+	if ((c.filefd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+		printf("Error socket(): %s(%d)\n", strerror(errno), errno);
+		return 0;
+	}
+	if (connect(c.filefd, (struct sockaddr*)&c.addr, sizeof(c.addr)) < 0) {
+		printf("Error connect(): %s(%d)\n", strerror(errno), errno);
+		return 0;
+	}
+	return 1;
 }
 
 int main(int argc, char* argv[])

@@ -11,6 +11,9 @@
 #define TYPE_RESPONSE "Type set to I."
 #define PORT_RESPONSE "PORT command successful."
 #define RETR_RESPONSE_READY_TO_CONNECT "Opening BINARY mode data connection for "
+#define RETR_RESPONSE_TRANSEFER_COMPLETE "Transfer complete."
+#define STOR_RESPONSE_READY_TO_CONNECT "Opening BINARY mode data connection for "
+#define STOR_RESPONSE_TRANSEFER_COMPLETE "Transfer complete."
 int port = 21;
 int transferport = 0;
 char root[200] = "/tmp";
@@ -20,13 +23,23 @@ struct client
 	int connfd;
 	int filefd;
 	int transBytes = 0;
+	int transFileNum = 0;
 	struct sockaddr_in addr;
 	int status;
+	pthread_t fileTrans = NULL;
+};
+
+struct fileTrans
+{
+	FILE* fp;
+	struct client* c;
 };
 
 enum ClientStatus
 {
-	PORT_STATUS
+	PORT_STATUS,
+	PASV_STATUS,
+	TRANS_STATUS
 };
 
 enum Cmd {
