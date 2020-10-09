@@ -51,7 +51,6 @@ int start()
 		//等待client的连接 -- 阻塞函数
 		if ((connfd = accept(listenfd, NULL, NULL)) == -1) {
 			printf("Error accept(): %s(%d)\n", strerror(errno), errno);
-			continue;
 		}
 
 		pthread_t t;
@@ -67,6 +66,7 @@ void * newClient(void * arg)
 {
 	pthread_detach(pthread_self());
 	struct client c;
+	c.status = VISITOR_STATUS;
 	c.connfd = ((int*)arg)[0];
 
 	response(c.connfd, SERVICE_READY, INITIAL_RESPONSE);
@@ -84,10 +84,14 @@ void * newClient(void * arg)
 		{
 		case USER:
 			response(c.connfd, USER_NAME_OK_NEED_PASS, USER_RESPONSE);
+			c.status = WAIT_PASSWORD_STATUS;
 			break;
 		case PASS:
 			if (!strcmp("annoymous", cmdArg))
+			{
 				response(c.connfd, WELCOME, PASS_RESPONSE);
+				c.status = LOGIN_STATUS;
+			}
 			else
 			{
 
@@ -110,15 +114,19 @@ void * newClient(void * arg)
 			portCmd(c, cmdArg);
 			break;
 		case PASV:
+			pasvCmd(c);
 			break;
 		case QUIT:
 		case ABOR:
-
-			break;
+			quitCmd(c);
+			pthread_exit(NULL);
+			return;
 		case RETR:
 			retrCmd(c, cmdArg);
 			break;
 		case STOR:
+			storCmd(c, cmdArg);
+			break;
 
 		}
 
@@ -140,8 +148,21 @@ void response(int connfd, ResCode code, char* info)
 	send(connfd, buf, strlen(buf), 0);
 }
 
+bool validStatus(struct client& c)
+{
+	if (c.status == LOGIN_STATUS || c.status == PORT_STATUS || c.status == PASV_STATUS)
+		return true;
+	else
+	{
+		response(c.connfd, NOT_LOGGED_IN, PERMISSION_DENIED_RESPONSE);
+	}
+	return false;
+}
+
 int portCmd(struct client& c, char* arg)
 {
+	if (!validStatus(c))
+		return 0;
 	char * h;
 	int portArg[6];
 	for (int i = 0; i < 6; ++i) {
@@ -168,8 +189,10 @@ int portCmd(struct client& c, char* arg)
 //未完成
 int pasvCmd(struct client& c)
 {
+	if (!validStatus(c))
+		return 0;
 	//创建socket
-	if ((c.filefd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+	if ((c.acceptfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
 		printf("Error socket(): %s(%d)\n", strerror(errno), errno);
 		return 1;
 	}
@@ -188,7 +211,7 @@ int pasvCmd(struct client& c)
 		port = rand() % 45535 + 20000;
 		serverAddr.sin_port = htons(port);
 		//将本机的ip和port与socket绑定
-		if (bind(c.filefd, (struct sockaddr*)&serverAddr, sizeof(sockaddr)) == -1) {
+		if (bind(c.acceptfd, (struct sockaddr*)&serverAddr, sizeof(sockaddr)) == -1) {
 			printf("Port %d cannot be binded", port);
 		}
 		else
@@ -196,44 +219,50 @@ int pasvCmd(struct client& c)
 	}
 
 	////开始监听socket
-	//if (listen(listenfd, SOMAXCONN) == -1) {
-	//	printf("Error listen(): %s(%d)\n", strerror(errno), errno);
-	//	return 1;
-	//}
+	if (listen(c.acceptfd, SOMAXCONN) == -1) {
+		printf("Error listen(): %s(%d)\n", strerror(errno), errno);
+		return 1;
+	}
 
-	accept(c.filefd, NULL, NULL);
+	char res[COMMAND_BUFFER_MAX] = PASY_RESPONSE;
+	sprintf(&res[strlen(res)], "%d,%d", (port >> 8) & 0xFF, port & 0xFF);
+	response(c.connfd, PASSIVE_MODE_ON, res);
+
 }
 
 int retrCmd(struct client& c, char* arg)
 {
+	if (!validStatus(c))
+		return 0;
+	if (c.status == LOGIN_STATUS)
+	{
+		response(c.connfd, NO_CONNECTION, NO_MODE_SPECIFIED_RESPONSE);
+		return 0;
+	}
 	if (strncmp(arg, "../", 3) == 0)
 	{
 		//不能访问上层文件
 		return 0;
 	}
+	c.fp = NULL;
+	c.fp = fopen(arg, "rb");
+	if (!c.fp)
+	{
+		//文件不存在
+	}
+	fseek(c.fp, 0, SEEK_END);
+	int len = ftell(c.fp);
+	char res[COMMAND_BUFFER_MAX] = RETR_RESPONSE_READY_TO_CONNECT;
+	strcat(res, arg);
+	sprintf(&res[strlen(res)], "(%d bytes)", len);
+	response(c.connfd, FILE_STATUS_OKAY, res);
+	fseek(c.fp, 0, SEEK_SET);
+
 	if (c.status == PORT_STATUS)
 	{
-		FILE* fp = NULL;
-		fp = fopen(arg, "rb");
-		if (!fp)
-		{
-			//文件不存在
-		}
-		fseek(fp, 0, SEEK_END);
-		int len = ftell(fp);
-		char res[COMMAND_BUFFER_MAX] = RETR_RESPONSE_READY_TO_CONNECT;
-		strcat(res, arg);
-		sprintf(&res[strlen(res)], "(%d bytes)", len);
-		response(c.connfd, FILE_STATUS_OKAY, res);
-
 		if (connectFileFd(c))
 		{
-			fseek(fp, 0, SEEK_SET);
-
-			struct fileTrans ft;
-			ft.fp = fp;
-			ft.c = &c;
-			pthread_create(&c.fileTrans, NULL, sendFile, (void*)&ft);
+			pthread_create(&c.fileTrans, NULL, sendFile, (void*)&c);
 
 			//char buf[TRANSFER_BUFFER_MAX];
 			//int sum = 0;
@@ -250,45 +279,53 @@ int retrCmd(struct client& c, char* arg)
 		}
 		else
 		{
-			fclose(fp);
+			fclose(c.fp);
 			return 0;
 		}
 		
 	}
 	else if (c.status == PASV_STATUS)
 	{
-		return;
+		c.filefd = accept(c.acceptfd, NULL, NULL);
+		pthread_create(&c.fileTrans, NULL, sendFile, (void*)&c);
 	}
 }
 
 
 void cleanup(void* arg)
 {
-	struct fileTrans* ft = (struct fileTrans*)arg;
-	close(ft->c->filefd);
-	fclose(ft->fp);
+	struct client* c = (struct client*)arg;
+	close(c->filefd);
+	if (c->acceptfd != NULL)
+		close(c->acceptfd);
+	fclose(c->fp);
+	c->status = LOGIN_STATUS;
 }
 
 void* sendFile(void* arg)
 {
 	pthread_detach(pthread_self());
 
-	struct fileTrans* ft = (struct fileTrans*)arg;
-	pthread_cleanup_push(cleanup, ft);
+	struct client* c = (struct client*)arg;
+	pthread_cleanup_push(cleanup, c);
+	c->status = TRANS_STATUS;
 	char buf[TRANSFER_BUFFER_MAX];
 	int sum = 0;
-	while (!feof(ft->fp)) {
-		int n = fread(buf, sizeof(char), TRANSFER_BUFFER_MAX, ft->fp);
-		send(ft->c->filefd, buf, n, 0);
+	while (!feof(c->fp)) {
+		int n = fread(buf, sizeof(char), TRANSFER_BUFFER_MAX, c->fp);
+		send(c->filefd, buf, n, 0);
 		sum += n;
 	}
-	close(ft->c->filefd);
-	ft->c->transBytes += sum;
-	++ft->c->transFileNum;
+	close(c->filefd);
+	c->transBytes += sum;
+	++c->transFileNum;
+	if (c->acceptfd != NULL)
+		close(c->acceptfd);
 
-	fclose(ft->fp);
+	fclose(c->fp);
+	c->status = LOGIN_STATUS;
 
-	response(ft->c->connfd, TRANSFER_COMPLETE, RETR_RESPONSE_TRANSEFER_COMPLETE);
+	response(c->connfd, TRANSFER_COMPLETE, RETR_RESPONSE_TRANSEFER_COMPLETE);
 
 	pthread_cleanup_pop(0);
 	pthread_exit(NULL);
@@ -296,26 +333,30 @@ void* sendFile(void* arg)
 
 int storCmd(struct client& c, char* arg)
 {
+	if (!validStatus(c))
+		return 0;
+	if (c.status == LOGIN_STATUS)
+	{
+		response(c.connfd, NO_CONNECTION, NO_MODE_SPECIFIED_RESPONSE);
+		return 0;
+	}
 	if (strncmp(arg, "../", 3) == 0)
 	{
 		//不能访问上层文件
 		return 0;
 	}
+	c.fp = NULL;
+	c.fp = fopen(arg, "wb");
+	char res[COMMAND_BUFFER_MAX] = STOR_RESPONSE_READY_TO_CONNECT;
+	strcat(res, arg);
+	response(c.connfd, FILE_STATUS_OKAY, res);
+
 	if (c.status == PORT_STATUS)
 	{
-		FILE* fp = NULL;
-		fp = fopen(arg, "wb");
-		char res[COMMAND_BUFFER_MAX] = STOR_RESPONSE_READY_TO_CONNECT;
-		strcat(res, arg);
-		response(c.connfd, FILE_STATUS_OKAY, res);
-
 		if (connectFileFd(c))
 		{
 
-			struct fileTrans ft;
-			ft.fp = fp;
-			ft.c = &c;
-			pthread_create(&c.fileTrans, NULL, sendFile, (void*)&ft);
+			pthread_create(&c.fileTrans, NULL, sendFile, (void*)&c);
 
 			/*char buf[TRANSFER_BUFFER_MAX];
 			int sum = 0;
@@ -335,13 +376,14 @@ int storCmd(struct client& c, char* arg)
 		}
 		else
 		{
-			fclose(fp);
+			fclose(c.fp);
 			return 0;
 		}
 	}
 	else if (c.status == PASV_STATUS)
 	{
-
+		c.filefd = accept(c.acceptfd, NULL, NULL);
+		pthread_create(&c.fileTrans, NULL, sendFile, (void*)&c);
 	}
 }
 
@@ -349,26 +391,28 @@ void* recvFile(void* arg)
 {
 	pthread_detach(pthread_self());
 
-	struct fileTrans* ft = (struct fileTrans*)arg;
-	pthread_cleanup_push(cleanup, ft);
+	struct client* c = (struct client*)arg;
+	pthread_cleanup_push(cleanup, c);
+	c->status = TRANS_STATUS;
 	char buf[TRANSFER_BUFFER_MAX];
 	int sum = 0;
-	while (!feof(ft->fp)) {
-		int n = recv(ft->c->filefd, buf, TRANSFER_BUFFER_MAX, 0);
-		fwrite(buf, sizeof(char), n, ft->fp);
+	while (!feof(c->fp)) {
+		int n = recv(c->filefd, buf, TRANSFER_BUFFER_MAX, 0);
+		fwrite(buf, sizeof(char), n, c->fp);
 		sum += n;
 	}
 
-	close(ft->c->filefd);
-	ft->c->transBytes += sum;
-	++ft->c->transFileNum;
+	close(c->filefd);
+	c->transBytes += sum;
+	++c->transFileNum;
 
-	fclose(ft->fp);
+	fclose(c->fp);
+	c->status = LOGIN_STATUS;
 
-	char res[COMMAND_BUFFER_MAX];
-	strcat(res, STOR_RESPONSE_TRANSEFER_COMPLETE);
+	char res[COMMAND_BUFFER_MAX] = STOR_RESPONSE_TRANSEFER_COMPLETE;
+	//strcat(res, STOR_RESPONSE_TRANSEFER_COMPLETE);
 	sprintf(&res[strlen(res)], "(%d bytes)", sum);
-	response(ft->c->connfd, TRANSFER_COMPLETE, res);
+	response(c->connfd, TRANSFER_COMPLETE, res);
 
 	pthread_cleanup_pop(0);
 	pthread_exit(NULL);
@@ -385,6 +429,18 @@ int connectFileFd(struct client& c)
 		return 0;
 	}
 	return 1;
+}
+
+int quitCmd(struct client& c)
+{
+	if (c.status = TRANS_STATUS)
+	{
+		pthread_cancel(c.fileTrans);
+	}
+	char res[COMMAND_BUFFER_MAX];
+	sprintf(res, QUIT_RESPONSE, c.transBytes, c.transFileNum);
+	response(c.connfd, SERVICE_CLOSE, res);
+	close(c.connfd);
 }
 
 int main(int argc, char* argv[])
