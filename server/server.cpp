@@ -151,7 +151,27 @@ void * newClient(void * arg)
 		case STOR:
 			storCmd(c, cmdArg);
 			break;
-
+		case MKD:
+			mkdCmd(c, cmdArg);
+			break;
+		case CWD:
+			cwdCmd(c, cmdArg);
+			break;
+		case PWD:
+			pwdCmd(c);
+			break;
+		case LIST:
+			listCmd(c, cmdArg);
+			break;
+		case RMD:
+			rmdCmd(c, cmdArg);
+			break;
+		case RNFR:
+			rnfrCmd(c, cmdArg);
+			break;
+		case RNTO:
+			rntoCmd(c, cmdArg);
+			break;
 		}
 
 	}
@@ -174,11 +194,20 @@ void response(int connfd, ResCode code, char* info)
 
 bool validStatus(struct client& c)
 {
+	if ((c.status & RENAME_STATUS) == RENAME_STATUS)
+	{
+		c.status = c.status & CLIENT_STATUS;
+		c.rename[0] = '\0';
+	}
 	if (c.status == LOGIN_STATUS || c.status == PORT_STATUS || c.status == PASV_STATUS)
 		return true;
 	else if (c.status == VISITOR_STATUS || c.status == WAIT_PASSWORD_STATUS)
 	{
 		response(c.connfd, NOT_LOGGED_IN, PERMISSION_DENIED_RESPONSE);
+	}
+	else if (c.status == TRANS_STATUS)
+	{
+
 	}
 	return false;
 }
@@ -484,7 +513,7 @@ char* processPath(char* path)
 
 int checkPath(char* path)
 {
-	if (strstr(path, "../") != NULL)
+	if (strstr(path, "..") != NULL)
 		return NO_ACCESS;
 
 	//if ((path[0] == '/') && (strstr(path, root) != NULL))
@@ -616,6 +645,34 @@ int listCmd(struct client& c, char* arg)
 	response(c.connfd, TRANSFER_COMPLETE, LIST_RESPONSE_TRANSEFER_COMPLETE);
 }
 
+int rmdCmd(struct client& c, char* arg)
+{
+	if (!validStatus(c))
+		return 0;
+	char res[COMMAND_BUFFER_MAX];
+	char dirname[200];
+	strcpy(dirname, arg);
+	if (checkPath(processPath(arg)) != IS_DIR)
+	{
+		// 不存在arg指定的文件夹
+		sprintf(res, RMD_RESPONSE_FAILED, dirname);
+		response(c.connfd, FILE_UNAVAILABLE, res);
+		return 1;
+	}
+	sprintf(res, RMD_SYSTEMCMD, arg);
+	if (system(res) < 0)
+	{
+		// rmd失败
+		sprintf(res, RMD_RESPONSE_FAILED, dirname);
+		response(c.connfd, FILE_UNAVAILABLE, res);
+		return 0;
+	}
+	// rmd成功
+	sprintf(res, RNTO_RESPONSE_OK, dirname);
+	response(c.connfd, FILE_COMMAND_OK, res);
+	return 0;
+}
+
 int rnfrCmd(struct client& c, char* arg)
 {
 	if (!validStatus(c))
@@ -629,6 +686,7 @@ int rnfrCmd(struct client& c, char* arg)
 		strcpy(c.rename, "\0");
 		return 1;
 	}
+	c.status = c.status | RENAME_STATUS;
 	sprintf(&res[strlen(res)], RNFR_RESPONSE_READY_FOR_RENAME, c.rename);
 	response(c.connfd, WAIT_FOR_NEW_NAME, res);
 	return 0;
@@ -636,29 +694,44 @@ int rnfrCmd(struct client& c, char* arg)
 
 int rntoCmd(struct client& c, char* arg)
 {
-	if (!validStatus(c))
-		return 0;
+	if ((c.status & RENAME_STATUS) != RENAME_STATUS)
+	{
+		if (!validStatus(c))
+			return 0;
+		else
+		{
+			// 上一条指令不为rntoCmd
+			response(c.connfd, BAD_SEQUENCE_OF_COMMANDS, RNTO_RESPONSE_WITHOUT_RNFR);
+			return 0;
+		}
+	}
 	char res[COMMAND_BUFFER_MAX];
 	char newname[200];
 	strcpy(newname, arg);
-	if (checkPath(processPath(arg)) == NO_ACCESS)
+	if (checkPath(processPath(arg)) != NO_ACCESS)
 	{
-		sprintf(res, RNTO_RESPONSE_FAILED, newname);
-		response(c.connfd, FILE_UNAVAILABLE, res);
+		// 已经存在arg指定的文件或文件夹（名字被占用）
+		sprintf(res, RNTO_RESPONSE_ALREADY_EXIST, newname);
+		response(c.connfd, FILE_NAME_NOT_ALLOWED, res);
 		strcpy(c.rename, "\0");
 		return 1;
 	}
 	sprintf(res, RNTO_SYSTEMCMD, c.rename, newname);
 	if (system(res) < 0)
 	{
-		// 错误
+		// rnto失败
+		response(c.connfd, FILE_NAME_NOT_ALLOWED, RNTO_RESPONSE_FAILED);
+		strcpy(c.rename, "\0");
 		return 0;
 	}
+	// rnto成功
 	sprintf(res, RNTO_RESPONSE_OK, c.rename, newname);
 	response(c.connfd, FILE_COMMAND_OK, res);
 	strcpy(c.rename, "\0");
 	return 0;
 }
+
+
 
 
 int main(int argc, char* argv[])
