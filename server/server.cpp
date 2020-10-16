@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -11,8 +12,31 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <dirent.h>
 #include "server.h"
 
+
+char* getServerIP(char* ip) {
+	char hname[128];
+	char temp[200];
+	struct hostent* hent;
+
+	gethostname(hname, sizeof(hname));
+	hent = gethostbyname(hname);
+
+	for (int i = 0; hent->h_addr_list[i]; i++) {
+		//struct in_addr* t = (struct in_addr*)(hent->h_addr_list[i]);
+		//int addr = t->s_addr;
+		/*ip0 = addr & 0xff;
+		ip1 = (addr >> 8) & 0xff;
+		ip2 = (addr >> 16) & 0xff;
+		ip3 = (addr >> 24) & 0xff;*/
+		sprintf(temp, "%s", inet_ntoa(*(struct in_addr*)(hent->h_addr_list[i])));
+	}
+	printf("%s\n", temp);
+	strcpy(ip, temp);
+	return ip;
+}
 
 int start()
 {
@@ -152,7 +176,7 @@ bool validStatus(struct client& c)
 {
 	if (c.status == LOGIN_STATUS || c.status == PORT_STATUS || c.status == PASV_STATUS)
 		return true;
-	else
+	else if (c.status == VISITOR_STATUS || c.status == WAIT_PASSWORD_STATUS)
 	{
 		response(c.connfd, NOT_LOGGED_IN, PERMISSION_DENIED_RESPONSE);
 	}
@@ -224,8 +248,9 @@ int pasvCmd(struct client& c)
 		return 1;
 	}
 
+	char ip[32];
 	char res[COMMAND_BUFFER_MAX] = PASY_RESPONSE;
-	sprintf(&res[strlen(res)], "%d,%d", (port >> 8) & 0xFF, port & 0xFF);
+	sprintf(&res[strlen(res)], "s%,%d,%d", getServerIP(ip), (port >> 8) & 0xFF, port & 0xFF);
 	response(c.connfd, PASSIVE_MODE_ON, res);
 
 }
@@ -239,9 +264,9 @@ int retrCmd(struct client& c, char* arg)
 		response(c.connfd, NO_CONNECTION, NO_MODE_SPECIFIED_RESPONSE);
 		return 0;
 	}
-	if (strncmp(arg, "../", 3) == 0)
+	if (checkPath(processPath(arg)) != IS_FILE)
 	{
-		//不能访问上层文件
+		response(c.connfd, CANNOT_OPEN_FILE, RETR_RESPONSE_CANNOT_OPEN_FILE);
 		return 0;
 	}
 	c.fp = NULL;
@@ -340,9 +365,11 @@ int storCmd(struct client& c, char* arg)
 		response(c.connfd, NO_CONNECTION, NO_MODE_SPECIFIED_RESPONSE);
 		return 0;
 	}
-	if (strncmp(arg, "../", 3) == 0)
+
+	if (checkPath(processPath(arg)) != IS_FILE)
 	{
 		//不能访问上层文件
+		response(c.connfd, CANNOT_OPEN_FILE, STOR_RESPONSE_CANNOT_OPEN_FILE);
 		return 0;
 	}
 	c.fp = NULL;
@@ -442,6 +469,197 @@ int quitCmd(struct client& c)
 	response(c.connfd, SERVICE_CLOSE, res);
 	close(c.connfd);
 }
+
+char* processPath(char* path)
+{
+	if (path[0] == '/')
+	{
+		char pathWithRoot[200];
+		strcpy(pathWithRoot, root);
+		strcat(pathWithRoot, path);
+		strcpy(path, pathWithRoot);;
+	}
+	return path;
+}
+
+int checkPath(char* path)
+{
+	if (strstr(path, "../") != NULL)
+		return NO_ACCESS;
+
+	//if ((path[0] == '/') && (strstr(path, root) != NULL))
+
+	struct stat s;
+	
+	if (stat(path, &s) == -1)
+		return NO_ACCESS;
+
+	if (s.st_mode & S_IFDIR)
+		return IS_DIR;
+	return IS_FILE;
+}
+
+int mkdCmd(struct client& c, char* arg)
+{
+	if (!validStatus(c))
+		return 0;
+	char res[COMMAND_BUFFER_MAX];
+	if (checkPath(processPath(arg)) == IS_DIR)
+	{
+		sprintf(res, "\"%s\" %s", arg, MKD_RESPONSE_ALREADY_EXIST);
+		response(c.connfd, PARAMETER_NOT_SUPPORTED, res);
+		return 1;
+	}
+	if (mkdir(arg, 0777) == 0)
+	{
+		sprintf(res, "\"%s\" %s", arg, MKD_RESPONSE_OK);
+		response(c.connfd, PARAMETER_NOT_SUPPORTED, res);
+		return 0;
+	}
+	else 
+	{
+		response(c.connfd, FILE_UNAVAILABLE, MKD_RESPONSE_FAILED);
+		return 1;
+	}
+}
+
+int cwdCmd(struct client& c, char* arg)
+{
+	if (!validStatus(c))
+		return 0;
+	char res[COMMAND_BUFFER_MAX];
+	strcpy(res, arg);
+	if (checkPath(processPath(arg)) != IS_DIR)
+	{
+		sprintf(&res[strlen(res)], ":%s", CWD_RESPONSE_FAILED);
+		response(c.connfd, FILE_UNAVAILABLE, res);
+		return 1;
+	}
+	chdir(arg);
+	getcwd(res, sizeof(res));
+	strcpy(c.pathPrefix, &res[strlen(root)]);
+	response(c.connfd, FILE_COMMAND_OK, CWD_RESPONSE_OK);
+	return 0;
+}
+
+int pwdCmd(struct client& c)
+{
+	if (!validStatus(c))
+		return 0;
+	char res[COMMAND_BUFFER_MAX];
+	sprintf(res, "\"%s\"", c.pathPrefix);
+	response(c.connfd, PATHNAME_CREATED, res);
+	return 0;
+}
+
+int listCmd(struct client& c, char* arg)
+{
+	if (!validStatus(c))
+		return 0;
+	if (c.status == LOGIN_STATUS)
+	{
+		response(c.connfd, NO_CONNECTION, NO_MODE_SPECIFIED_RESPONSE);
+		return 0;
+	}
+	if (strlen(arg) != 0 && checkPath(processPath(arg)) == NO_ACCESS)
+	{
+		response(c.connfd, CANNOT_OPEN_FILE, RETR_RESPONSE_CANNOT_OPEN_FILE);
+		return 0;
+	}
+	
+	char res[COMMAND_BUFFER_MAX];
+	sprintf(res, LIST_SYSTEMCMD, arg);
+	if (system(res) < 0)
+	{
+		// 错误
+		return 0;
+	}
+
+	c.fp = NULL;
+	c.fp = fopen(LIST_OUTPUT_FILE, "rb");
+	if (!c.fp)
+	{
+		//文件不存在
+	}
+	if (c.status == PORT_STATUS)
+	{
+		if (connectFileFd(c))
+		{
+
+		}
+		else
+		{
+			fclose(c.fp);
+			return 0;
+		}
+
+	}
+	else if (c.status == PASV_STATUS)
+	{
+		c.filefd = accept(c.acceptfd, NULL, NULL);
+	}
+	c.status = TRANS_STATUS;
+	char buf[TRANSFER_BUFFER_MAX];
+	int sum = 0;
+	while (!feof(c.fp)) {
+		int n = fread(buf, sizeof(char), TRANSFER_BUFFER_MAX, c.fp);
+		send(c.filefd, buf, n, 0);
+		sum += n;
+	}
+	close(c.filefd);
+	c.transBytes += sum;
+	if (c.acceptfd != NULL)
+		close(c.acceptfd);
+	fclose(c.fp);
+	c.status = LOGIN_STATUS;
+
+	response(c.connfd, TRANSFER_COMPLETE, LIST_RESPONSE_TRANSEFER_COMPLETE);
+}
+
+int rnfrCmd(struct client& c, char* arg)
+{
+	if (!validStatus(c))
+		return 0;
+	char res[COMMAND_BUFFER_MAX];
+	strcpy(c.rename, arg);
+	if (checkPath(processPath(arg)) == NO_ACCESS)
+	{
+		sprintf(res, RNFR_RESPONSE_FAILED, c.rename);
+		response(c.connfd, FILE_UNAVAILABLE, res);
+		strcpy(c.rename, "\0");
+		return 1;
+	}
+	sprintf(&res[strlen(res)], RNFR_RESPONSE_READY_FOR_RENAME, c.rename);
+	response(c.connfd, WAIT_FOR_NEW_NAME, res);
+	return 0;
+}
+
+int rntoCmd(struct client& c, char* arg)
+{
+	if (!validStatus(c))
+		return 0;
+	char res[COMMAND_BUFFER_MAX];
+	char newname[200];
+	strcpy(newname, arg);
+	if (checkPath(processPath(arg)) == NO_ACCESS)
+	{
+		sprintf(res, RNTO_RESPONSE_FAILED, newname);
+		response(c.connfd, FILE_UNAVAILABLE, res);
+		strcpy(c.rename, "\0");
+		return 1;
+	}
+	sprintf(res, RNTO_SYSTEMCMD, c.rename, newname);
+	if (system(res) < 0)
+	{
+		// 错误
+		return 0;
+	}
+	sprintf(res, RNTO_RESPONSE_OK, c.rename, newname);
+	response(c.connfd, FILE_COMMAND_OK, res);
+	strcpy(c.rename, "\0");
+	return 0;
+}
+
 
 int main(int argc, char* argv[])
 {

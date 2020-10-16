@@ -10,22 +10,47 @@
 #define SYST_RESPONSE "UNIX Type: L8"
 #define TYPE_RESPONSE "Type set to I."
 #define PORT_RESPONSE "PORT command successful."
+#define PASY_RESPONSE "="
+#define QUIT_RESPONSE "You have transferred %d bytes in %d files.\r\nThank you for using the FTP service on ftp.ssast.org.\r\nGoodbye."
 #define RETR_RESPONSE_READY_TO_CONNECT "Opening BINARY mode data connection for "
 #define RETR_RESPONSE_TRANSEFER_COMPLETE "Transfer complete."
+#define RETR_RESPONSE_CANNOT_OPEN_FILE "Cannot open file on server."
 #define STOR_RESPONSE_READY_TO_CONNECT "Opening BINARY mode data connection for "
 #define STOR_RESPONSE_TRANSEFER_COMPLETE "Transfer complete."
+#define STOR_RESPONSE_CANNOT_OPEN_FILE "Cannot open file on server."
+#define CWD_RESPONSE_FAILED "No such file or directory."
+#define CWD_RESPONSE_OK "Okay."
+#define MKD_RESPONSE_ALREADY_EXIST "directory already exists\r\ntaking no action."
+#define MKD_RESPONSE_OK "directory created."
+#define MKD_RESPONSE_FAILED "Failed to create path."
+#define LIST_OUTPUT_FILE "listtmp.txt"
+#define LIST_SYSTEMCMD "ls -la %s | tail -n+2 > " LIST_OUTPUT_FILE
+#define LIST_RESPONSE_TRANSEFER_COMPLETE "List complete."
+#define RNFR_RESPONSE_FAILED "%s: No such file or directory."
+#define RNFR_RESPONSE_READY_FOR_RENAME "%s: File exists, ready for destination name."
+#define RNTO_RESPONSE_FAILED "%s: No such file or directory."
+#define RNTO_SYSTEMCMD "mv %s %s"
+#define RNTO_RESPONSE_OK "%s renamed to %s successfully."
+#define NO_MODE_SPECIFIED_RESPONSE "Can't open data connection."
+#define PERMISSION_DENIED_RESPONSE "Not logged in. Permission is denied."
 int port = 21;
 int transferport = 0;
 char root[200] = "/tmp";
+//char serverIP[20] = "";
+//int ip0, ip1, ip2, ip3;
 
 struct client
 {
 	int connfd;
+	int acceptfd;
 	int filefd;
 	int transBytes = 0;
 	int transFileNum = 0;
+	FILE* fp;
 	struct sockaddr_in addr;
 	int status;
+	char pathPrefix[200] = "";
+	char rename[200] = "";
 	pthread_t fileTrans = NULL;
 };
 
@@ -37,9 +62,19 @@ struct fileTrans
 
 enum ClientStatus
 {
+	VISITOR_STATUS,
+	WAIT_PASSWORD_STATUS,
+	LOGIN_STATUS,
 	PORT_STATUS,
 	PASV_STATUS,
 	TRANS_STATUS
+};
+
+enum StorageAuthority
+{
+	NO_ACCESS,
+	IS_FILE,
+	IS_DIR,
 };
 
 enum Cmd {
@@ -95,11 +130,19 @@ enum ResCode {
 
 	PATHNAME_CREATED = 257,
 
-	PERMISSION_DENIED = 500,
+	WAIT_FOR_NEW_NAME = 350,
+
+	NO_CONNECTION = 425,
+
+	//PERMISSION_DENIED = 500,
+	CANNOT_OPEN_FILE = 451,
+
 
 	COMMAND_NOT_IMPLEMENTED = 502,
 
 	PARAMETER_NOT_SUPPORTED = 504,
+
+	NOT_LOGGED_IN = 530,
 
 	FILE_UNAVAILABLE = 550,
 
