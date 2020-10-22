@@ -1,62 +1,27 @@
-#include <cstdio>
-#include <string.h>
-#include <unistd.h>
-#include <netdb.h>
-#include <arpa/inet.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
 #include <sys/stat.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <memory.h>
+#include <string.h>
+#include <getopt.h>
+#include <errno.h>
+#include <unistd.h>
+#include <ctype.h>
+#include <pthread.h>
+#include <dirent.h>
 using namespace std;
 
 #define RETR_RESPONSE_READY_TO_CONNECT "Opening BINARY mode data connection for "
 #define STR(x) #x
 #define PASY_RESPONSE "="
-
-void get_IP_server(char* IP) {
-	char hname[128];
-	char temp[200];
-	struct hostent* hent;
-	int i;
-
-	gethostname(hname, sizeof(hname));
-	hent = gethostbyname(hname);
-
-	for (i = 0; hent->h_addr_list[i]; i++) {
-		struct in_addr* t = (struct in_addr*)(hent->h_addr_list[i]);
-		int addr = t->s_addr;
-		printf("%d,%d,%d,%d\n", addr & 0xff, (addr >> 8) & 0xff, (addr >> 16) & 0xff, (addr >> 24) & 0xff);
-		sprintf(temp, "%s", inet_ntoa(*(struct in_addr*)(hent->h_addr_list[i])));
-	}
-	printf("%s\n", temp);
-	strcpy(IP, temp);
-}
-
-char * getServerIP(char * ip) {
-	char hname[128];
-	char temp[200];
-	struct hostent* hent;
-
-	gethostname(hname, sizeof(hname));
-	hent = gethostbyname(hname);
-
-	for (int i = 0; hent->h_addr_list[i]; i++) {
-		struct in_addr* t = (struct in_addr*)(hent->h_addr_list[i]);
-		int addr = t->s_addr;
-		/*ip0 = addr & 0xff;
-		ip1 = (addr >> 8) & 0xff;
-		ip2 = (addr >> 16) & 0xff;
-		ip3 = (addr >> 24) & 0xff;*/
-		sprintf(temp, "%s", inet_ntoa(*(struct in_addr*)(hent->h_addr_list[i])));
-	}
-	printf("%s\n", temp);
-	strcpy(ip, temp);
-	return ip;
-}
-
 int main()
 {
-	char* info = "12312345";
-	int code = 0;
-	char* tok = NULL;
-	info = strtok_r(info, " ", &tok);
+	chdir("/mnt/c/Users/12811/wsl/server/test");
+	int i = system("rm -rf TtDJfeltyK");
 	return 0;
 
 	/*char* info = "12312345";
